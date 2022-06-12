@@ -21,6 +21,8 @@
 #include <vector>
 #include <cstdlib>
 #include <ctime>
+#include <algorithm>
+#include <iostream>
 
 #define KEY_ESCAPE     9
 #define KEY_SPACEBAR  65
@@ -40,9 +42,60 @@ struct Size {
 };
 
 struct Rect {
-	long x, y;
-	long width, height;
+	int x, y;
+	int width, height;
+
+	inline Point tl() const
+	{
+		return {std::min(x,x+width), std::min(y, y+height)};
+	}
+	inline Point br() const
+	{
+		return {std::max(x,x+width), std::max(y, y+height)};
+	}
+	inline Point tr() const
+	{
+		return {std::max(x,x+width), std::min(y, y+height)};
+	}
+	inline Point bl() const
+	{
+		return {std::min(x,x+width), std::max(y, y+height)};
+	}
 };
+
+inline bool pointInRect(const Point &p, const Rect &r)
+{
+    return (   p.x >= r.tl().x && p.x <= r.br().x
+            && p.y >= r.tl().y && p.y <= r.br().y);
+}
+
+inline bool inRange(int i, int min_i, int max_i)
+{
+    return (i >= min_i && i <= max_i);
+}
+
+
+bool rectangleIntersect(const Rect &r1, const Rect &r2)
+{
+    // Check 1 -- Any corner inside rect
+    if ((pointInRect(r1.tl(), r2) || pointInRect(r1.br(), r2))
+        || (pointInRect(r1.tr(), r2) || pointInRect(r1.bl(), r2)))
+        return true;
+
+    // Check 2 -- Overlapped, but all points outside
+    //     +---+
+    //  +--+---+----+
+    //  |  |   |    |
+    //  +--+---+----+
+    //     +---+
+	if ( (inRange(r1.tl().x, r2.tl().x, r2.br().x) || inRange(r1.br().x, r2.tl().x, r2.br().x))
+		   && r1.tl().y < r2.tl().y && r1.br().y > r2.br().y
+        || (inRange(r1.tl().y, r2.tl().y, r2.br().y) || inRange(r1.br().y, r2.tl().y, r2.br().y))
+           && r1.tl().x < r2.tl().x && r1.br().x > r2.br().x )
+		return true;
+
+	return false;
+}
 
 class GameDisplay {
 public:
@@ -53,7 +106,7 @@ public:
 
 	Display *getDisplay();
 
-	void drawRect(unsigned long col, int x, int y, int width, int height);
+	void drawRect(unsigned long col, int x, int y, int width, int height) const;
 	void redraw();
 	Rect getGeometry();
 
@@ -90,7 +143,7 @@ Display *GameDisplay::getDisplay()
 	return display_;
 }
 
-void GameDisplay::drawRect(unsigned long col, int x, int y, int width, int height)
+void GameDisplay::drawRect(unsigned long col, int x, int y, int width, int height) const
 {
 	XSetForeground(display_, DefaultGC(display_,screen_), col);
 	XFillRectangle(display_, window_, DefaultGC(display_,screen_), x,y, width, height);
@@ -137,16 +190,30 @@ Rect GameDisplay::getGeometry()
 	return r;
 }
 
-struct Player {
+struct Character {
 	unsigned long color = 0x6091ab;
 	Point position {10, 10};
 	Size size {10, 10};
+
+	Character(unsigned long new_col, Point new_pos, Size new_sz)
+	: color(new_col), position(new_pos), size(new_sz) {};
+	
+	Rect bounds() const
+	{
+		return {position.x, position.y, size.width, size.height};
+	}
 };
 
-struct Food {
-	unsigned long color = 0xe0f731;
-	Point position {100, 100};
-	Size size {10, 10};
+struct Player : public Character {
+	Player() : Character(0x6091ab, {10,10}, {10,10}) {};
+};
+
+struct Food : public Character {
+	Food() : Character(0xe0f731, {100, 100}, {10, 10}) {};
+};
+
+struct Ghost : public Character {
+	Ghost() : Character(0xff0000, {100, 100}, {10, 10}) {};
 };
 
 class Game {
@@ -161,6 +228,7 @@ private:
 	bool is_running_ = true;
 	Player player_;
 	std::vector<Food> food_;
+	std::vector<Ghost> ghosts_;
 
 	bool getEvent();
 	void handleEvent();
@@ -168,14 +236,18 @@ private:
 	void drawPlayer();
 	void draw();
 	void createFood();
-	void drawSingleFood(const Food &f);
 	void drawAllFood();
+	void createGhosts();
+	void drawAllGhosts();
+	void update();
+	void drawCharacter(const Character &obj) const;
 };
 
 Game::Game()
 {
 	std::srand(std::time(nullptr));
 	createFood();
+	createGhosts();
 }
 
 void Game::run()
@@ -208,16 +280,13 @@ bool Game::getEvent()
 
 void Game::drawPlayer()
 {
-	gamedisplay_.drawRect(player_.color, 
-		player_.position.x,
-		player_.position.y,
-		player_.size.width,
-		player_.size.height);
+	drawCharacter(player_);
 }
 
 void Game::draw()
 {
 	drawAllFood();
+	drawAllGhosts();
 	drawPlayer();
 }
 
@@ -230,29 +299,76 @@ void Game::createFood()
 
 	for (auto &f: food_)
 	{
-		f.position.x = std::rand() % MAXX;
-		f.position.y = std::rand() % MAXY;
+		f.position.x = (std::rand() % MAXX)/10*10;
+		f.position.y = (std::rand() % MAXY)/10*10;
 	}
-}
-
-void Game::drawSingleFood(const Food &f)
-{
-	gamedisplay_.drawRect(f.color, 
-		f.position.x,
-		f.position.y,
-		f.size.width,
-		f.size.height);
 }
 
 void Game::drawAllFood()
 {
 	for (auto &f: food_)
 	{
-		drawSingleFood(f);
+		drawCharacter(f);
 	}
 }
 
+void Game::createGhosts()
+{
+	ghosts_.clear();
+	ghosts_.resize(10);
+	const int MAXX = 800;
+	const int MAXY = 600;
 
+	for (auto &g: ghosts_)
+	{
+		g.position.x = (std::rand() % MAXX)/10*10;
+		g.position.y = (std::rand() % MAXY)/10*10;
+	}
+}
+
+void Game::drawAllGhosts()
+{
+	for (auto &g: ghosts_)
+	{
+		drawCharacter(g);
+	}
+}
+
+void Game::update()
+{
+  	auto iter = std::find_if(food_.begin(), food_.end(), [&](const Food &f){
+		return rectangleIntersect(player_.bounds(), f.bounds());
+	});
+
+	if (iter != food_.end())
+	{
+		food_.erase(iter);
+	}
+
+	if (food_.empty())
+	{
+		is_running_ = false;
+	}
+  	
+	auto iter_ghosts = std::find_if(ghosts_.begin(), ghosts_.end(), [&](const Ghost &g){
+		return rectangleIntersect(player_.bounds(), g.bounds());
+	});
+
+	if (iter_ghosts != ghosts_.end())
+	{
+		is_running_ = false;
+		std::cout << "YOU LOSE!!\n";
+	}
+}
+
+void Game::drawCharacter(const Character &obj) const
+{
+	gamedisplay_.drawRect(obj.color, 
+		obj.position.x,
+		obj.position.y,
+		obj.size.width,
+		obj.size.height);
+}
 
 void Game::handleEvent()
 {
@@ -277,6 +393,7 @@ void Game::handleEvent()
 			case KEY_ESCAPE   : printf("KEY_ESCAPE\n"); 
 							    is_running_ = false; break;
 		}
+		update();
 	}
 }
 
