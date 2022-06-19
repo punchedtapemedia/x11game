@@ -23,6 +23,7 @@
 #include <ctime>
 #include <algorithm>
 #include <iostream>
+#include <chrono>
 
 #define KEY_ESCAPE     9
 #define KEY_SPACEBAR  65
@@ -32,6 +33,23 @@
 #define KEY_LEFT     113
 
 namespace mygame {
+
+class Time {
+public:
+    Time()
+    {
+        start_ = std::chrono::high_resolution_clock::now();
+    }
+
+    long time()
+    {
+        std::chrono::duration<long, std::nano> elap = std::chrono::high_resolution_clock::now() - start_;
+        return elap.count();
+    }
+
+private:
+    std::chrono::high_resolution_clock::time_point start_;
+};
 
 struct Point {
 	int x, y;
@@ -109,6 +127,7 @@ public:
 	void drawRect(unsigned long col, int x, int y, int width, int height) const;
 	void redraw();
 	Rect getGeometry();
+    void drawText(int x, int y, const std::string &str) const;
 
 private:
 	Display *display_;
@@ -190,6 +209,12 @@ Rect GameDisplay::getGeometry()
 	return r;
 }
 
+void GameDisplay::drawText(int x, int y, const std::string &str) const
+{
+    XDrawString(display_, window_, DefaultGC(display_, screen_), x, y, str.c_str(), str.size());
+}
+
+
 struct Character {
 	unsigned long color = 0x6091ab;
 	Point position {10, 10};
@@ -213,7 +238,35 @@ struct Food : public Character {
 };
 
 struct Ghost : public Character {
-	Ghost() : Character(0xff0000, {100, 100}, {10, 10}) {};
+	Ghost() : Character(0xff0000, {100, 100}, {10, 10})
+    {
+        time_at_last_move_ns_ = time_.time();
+    };
+
+    void move()
+    {
+        int direction = std::rand() % 4;
+        const int MOVE_DIST = 10;
+
+        switch (direction)
+        {
+            case 0 : position.y -= MOVE_DIST; break;
+            case 1 : position.y += MOVE_DIST; break;
+            case 2 : position.x -= MOVE_DIST; break;
+            case 3 : position.x += MOVE_DIST; break;
+        }
+
+        time_at_last_move_ns_ = time_.time();
+    }
+
+    bool isTimeToMove()
+    {
+        return ((time_.time() - time_at_last_move_ns_) >= move_time_ns_);
+    }
+
+    long time_at_last_move_ns_;
+    long move_time_ns_ {250'000'000};
+    Time time_;
 };
 
 class Game {
@@ -226,12 +279,16 @@ private:
 	GameDisplay gamedisplay_;
 	XEvent event_;
 	bool is_running_ = true;
+    bool game_over = false;
+    bool game_won = false;
 	Player player_;
 	std::vector<Food> food_;
 	std::vector<Ghost> ghosts_;
 
 	bool getEvent();
+    void updateGhosts();
 	void handleEvent();
+    void resetGame();
 	bool isPlayerWithinBounds();
 	void drawPlayer();
 	void draw();
@@ -239,6 +296,7 @@ private:
 	void drawAllFood();
 	void createGhosts();
 	void drawAllGhosts();
+    void drawMessage();
 	void update();
 	void drawCharacter(const Character &obj) const;
 };
@@ -254,13 +312,17 @@ void Game::run()
 {
 	while (is_running_)
 	{
-		if (getEvent())
+        if (!game_over)
+            updateGhosts();
+
+        if (getEvent())
 		{
 			handleEvent();
-			if (!isPlayerWithinBounds())
+			if (!game_over && !isPlayerWithinBounds())
 			{
 				printf("PLAYER OUT OF BOUNDS -- GAME OVER!! -- YOU LOSE!!\n");
-				is_running_ = false;
+                game_over = true;
+                game_won = false;
 			}
 		}
 	}
@@ -288,6 +350,7 @@ void Game::draw()
 	drawAllFood();
 	drawAllGhosts();
 	drawPlayer();
+    drawMessage();
 }
 
 void Game::createFood()
@@ -334,6 +397,17 @@ void Game::drawAllGhosts()
 	}
 }
 
+void Game::drawMessage()
+{
+    if (!game_over)
+        return;
+
+    if (game_won)
+        gamedisplay_.drawText(100, 100, "YOU WIN!!  PRESS SPACEBAR TO RESTART...");
+    else
+        gamedisplay_.drawText(100, 100, "YOU LOSE!! PRESS SPACEBAR TO RESTART...");
+}
+
 void Game::update()
 {
   	auto iter = std::find_if(food_.begin(), food_.end(), [&](const Food &f){
@@ -347,7 +421,8 @@ void Game::update()
 
 	if (food_.empty())
 	{
-		is_running_ = false;
+		game_over = true;
+        game_won = true;
 	}
   	
 	auto iter_ghosts = std::find_if(ghosts_.begin(), ghosts_.end(), [&](const Ghost &g){
@@ -356,7 +431,8 @@ void Game::update()
 
 	if (iter_ghosts != ghosts_.end())
 	{
-		is_running_ = false;
+        game_over = true;
+		game_won = false;
 		std::cout << "YOU LOSE!!\n";
 	}
 }
@@ -368,6 +444,21 @@ void Game::drawCharacter(const Character &obj) const
 		obj.position.y,
 		obj.size.width,
 		obj.size.height);
+}
+
+void Game::updateGhosts()
+{
+    bool ghost_moved = false;
+    for (auto &g: ghosts_)
+    {
+        if (g.isTimeToMove()) {
+            g.move();
+            ghost_moved = true;
+        }
+    }
+
+    if (ghost_moved)
+        gamedisplay_.redraw();
 }
 
 void Game::handleEvent()
@@ -383,18 +474,27 @@ void Game::handleEvent()
 
 		switch (event_.xkey.keycode)
 		{
-			case KEY_UP       : printf("KEY_UP\n");    player_.position.y -= 10; gamedisplay_.redraw(); break;
-			case KEY_DOWN     : printf("KEY_DOWN\n");  player_.position.y += 10; gamedisplay_.redraw(); break;
-			case KEY_LEFT     : printf("KEY_LEFT\n");  player_.position.x -= 10; gamedisplay_.redraw(); break;
-			case KEY_RIGHT    : printf("KEY_RIGHT\n"); player_.position.x += 10; gamedisplay_.redraw(); break;
+			case KEY_UP       : printf("KEY_UP\n");    if (!game_over) { player_.position.y -= 10; gamedisplay_.redraw(); } break;
+			case KEY_DOWN     : printf("KEY_DOWN\n");  if (!game_over) { player_.position.y += 10; gamedisplay_.redraw(); } break;
+			case KEY_LEFT     : printf("KEY_LEFT\n");  if (!game_over) { player_.position.x -= 10; gamedisplay_.redraw(); } break;
+			case KEY_RIGHT    : printf("KEY_RIGHT\n"); if (!game_over) { player_.position.x += 10; gamedisplay_.redraw(); } break;
 			
-			case KEY_SPACEBAR : printf("KEY_SPACEBAR\n"); break;
-			
+			case KEY_SPACEBAR : printf("KEY_SPACEBAR\n"); if (game_over) resetGame(); break;
+
 			case KEY_ESCAPE   : printf("KEY_ESCAPE\n"); 
 							    is_running_ = false; break;
 		}
 		update();
 	}
+}
+
+void Game::resetGame()
+{
+    player_.position = {10, 10};
+    createFood();
+    createGhosts();
+    game_won = false;
+    game_over = false;
 }
 
 bool Game::isPlayerWithinBounds()
