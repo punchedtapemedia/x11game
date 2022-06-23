@@ -16,467 +16,505 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 #include <X11/Xlib.h>
-#include <stdexcept>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <stdexcept>
 #include <vector>
+#include <cstdlib>
 #include <ctime>
+#include <algorithm>
+#include <iostream>
+#include <chrono>
 
-#define KEY_ESC 			9
-#define KEY_RIGHT_ARROW 	114
-#define KEY_LEFT_ARROW 		113
-#define KEY_UP_ARROW 		111
-#define KEY_DOWN_ARROW		116
-#define KEY_LEFT_CTRL		37
-#define KEY_RIGHT_CTRL  	105
-#define KEY_LEFT_SHIFT  	50
-#define KEY_RIGHT_SHIFT 	62
-#define KEY_LEFT_ALT		64
-#define KEY_RIGHT_ALT		108
-#define KEY_SPACEBAR		65
-#define KEY_NUM_LEFT_ARROW	83
-#define KEY_NUM_RIGHT_ARROW	85
-#define KEY_NUM_UP_ARROW	80
-#define KEY_NUM_DOWN_ARROW	88
+#define KEY_ESCAPE     9
+#define KEY_SPACEBAR  65
+#define KEY_UP       111
+#define KEY_RIGHT    114
+#define KEY_DOWN     116
+#define KEY_LEFT     113
 
-#define DIFFTM_MS(ST,EN) ((EN.tv_nsec - ST.tv_nsec)/1000000.0 + (EN.tv_sec - ST.tv_sec)*1000.0)
+namespace mygame {
 
-typedef struct {
+class Time {
+public:
+    Time()
+    {
+        start_ = std::chrono::high_resolution_clock::now();
+    }
+
+    long time()
+    {
+        std::chrono::duration<long, std::nano> elap = std::chrono::high_resolution_clock::now() - start_;
+        return elap.count();
+    }
+
+private:
+    std::chrono::high_resolution_clock::time_point start_;
+};
+
+struct Point {
 	int x, y;
-} Point;
+};
 
-typedef struct {
+struct Size {
 	int width, height;
-} Size;
+};
 
-typedef struct {
-	Point p;
-	Size s;
-} Rect;
+struct Rect {
+	int x, y;
+	int width, height;
 
-bool isRectOverlapped(Point p1, Size s1, Point p2, Size s2)
+	inline Point tl() const
+	{
+		return {std::min(x,x+width), std::min(y, y+height)};
+	}
+	inline Point br() const
+	{
+		return {std::max(x,x+width), std::max(y, y+height)};
+	}
+	inline Point tr() const
+	{
+		return {std::max(x,x+width), std::min(y, y+height)};
+	}
+	inline Point bl() const
+	{
+		return {std::min(x,x+width), std::max(y, y+height)};
+	}
+};
+
+inline bool pointInRect(const Point &p, const Rect &r)
 {
-	if (   ((p1.x          >= p2.x && p1.x          <= p2.x+s2.width) && (p1.y           >= p2.y && p1.y           < p2.y+s2.height ))
-		|| ((p1.x          >= p2.x && p1.x          <= p2.x+s2.width) && (p1.y+s1.height >= p2.y && p1.y+s1.height < p2.y+s2.height ))
-		|| ((p1.x+s1.width >= p2.x && p1.x+s1.width <= p2.x+s2.width) && (p1.y           >= p2.y && p1.y           < p2.y+s2.height ))
-		|| ((p1.x+s1.width >= p2.x && p1.x+s1.width <= p2.x+s2.width) && (p1.y+s1.height >= p2.y && p1.y+s1.height < p2.y+s2.height )) )
-		{
-			return true;
-		}
+    return (   p.x >= r.tl().x && p.x <= r.br().x
+            && p.y >= r.tl().y && p.y <= r.br().y);
+}
+
+inline bool inRange(int i, int min_i, int max_i)
+{
+    return (i >= min_i && i <= max_i);
+}
+
+
+bool rectangleIntersect(const Rect &r1, const Rect &r2)
+{
+    // Check 1 -- Any corner inside rect
+    if ((pointInRect(r1.tl(), r2) || pointInRect(r1.br(), r2))
+        || (pointInRect(r1.tr(), r2) || pointInRect(r1.bl(), r2)))
+        return true;
+
+    // Check 2 -- Overlapped, but all points outside
+    //     +---+
+    //  +--+---+----+
+    //  |  |   |    |
+    //  +--+---+----+
+    //     +---+
+	if ( (inRange(r1.tl().x, r2.tl().x, r2.br().x) || inRange(r1.br().x, r2.tl().x, r2.br().x))
+		   && r1.tl().y < r2.tl().y && r1.br().y > r2.br().y
+        || (inRange(r1.tl().y, r2.tl().y, r2.br().y) || inRange(r1.br().y, r2.tl().y, r2.br().y))
+           && r1.tl().x < r2.tl().x && r1.br().x > r2.br().x )
+		return true;
+
 	return false;
 }
 
-class Player {
+class GameDisplay {
 public:
-	const Point INITIAL_POSITION = {50,50};
-	const Size SIZE = {10, 10};
-	Point position = INITIAL_POSITION;
+	const int DEFAULT_WIDTH = 800;
+	const int DEFAULT_HEIGHT = 600;
+	GameDisplay();
+	~GameDisplay();
 
-	Player() {};
-	~Player() {};
+	Display *getDisplay();
+
+	void drawRect(unsigned long col, int x, int y, int width, int height) const;
+	void redraw();
+	Rect getGeometry();
+    void drawText(int x, int y, const std::string &str) const;
+
+private:
+	Display *display_;
+	int screen_;
+	Window window_;
 };
 
-class Food {
-public:
-	const Size SIZE = {10, 10};
-	const int COLOR[3] = {255,0,0};
-
-	Point position = {0,0};
-	bool eaten = false;
-
-	Food() {};
-	~Food() {};
-};
-
-class Ghost {
-	struct timespec time_to_move;
-	double delta_t_sec;
-
-public:
-	const Size SIZE = {10, 10};
-	const int COLOR[3] = {0,0,255};
-
-	Point position = {0,0};
-	bool active = true;
-	int speed = 4;
-
-	Ghost() { delta_t_sec = 1.0 / (double)speed; clock_gettime(CLOCK_MONOTONIC, &time_to_move); };
-	~Ghost() {};
-
-	bool isTimeToMove();
-	void updateTimeToMove();
-};
-
-void Ghost::updateTimeToMove()
+GameDisplay::GameDisplay()
 {
-	time_to_move.tv_nsec += delta_t_sec*1e9;
-	while (time_to_move.tv_nsec > 1000000000L)
+	display_ = XOpenDisplay(NULL);
+	if (display_ == NULL)
 	{
-		time_to_move.tv_nsec -= 1000000000L;
-		time_to_move.tv_sec += 1;
+		throw std::runtime_error("Unable to open the display");
 	}
+
+	screen_ = DefaultScreen(display_);
+
+	window_ = XCreateSimpleWindow(display_, RootWindow(display_,screen_), 0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT, 1, 
+                             BlackPixel(display_,screen_), 0x363d4d); //WhitePixel(display_,screen_));
+
+	XSelectInput(display_, window_, KeyPressMask | ExposureMask );
+	XMapWindow(display_, window_);
 }
 
-bool Ghost::isTimeToMove()
+GameDisplay::~GameDisplay()
 {
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-
-	printf("%s::%s::%d: dt=%lf ms\n", __FILE__, __FUNCTION__, __LINE__, DIFFTM_MS(now, time_to_move));
-	if (DIFFTM_MS(now, time_to_move) < 0)
-		return true;
-	else
-		return false;
+	XCloseDisplay(display_);
 }
+
+Display *GameDisplay::getDisplay()
+{
+	return display_;
+}
+
+void GameDisplay::drawRect(unsigned long col, int x, int y, int width, int height) const
+{
+	XSetForeground(display_, DefaultGC(display_,screen_), col);
+	XFillRectangle(display_, window_, DefaultGC(display_,screen_), x,y, width, height);
+}
+
+void GameDisplay::redraw()
+{
+	XClearWindow(display_, window_);
+
+	Window root_wind;
+	int x, y;
+	unsigned int width, height, border_width, depth;
+	XGetGeometry(display_, window_, &root_wind, &x, &y, &width,
+					  &height, &border_width, &depth);
+					  
+	XEvent ev;
+	ev.xexpose.type = Expose;
+	ev.xexpose.display = display_;
+	ev.xexpose.window = window_;
+	ev.xexpose.x = x;
+	ev.xexpose.y = y;
+	ev.xexpose.width = width;
+	ev.xexpose.height = height;
+	ev.xexpose.count = 0;
+	
+	XSendEvent(display_, window_, false, ExposureMask, &ev);
+}
+
+Rect GameDisplay::getGeometry()
+{
+	Window root_wind;
+	int x, y;
+	unsigned int width, height, border_width, depth;
+	XGetGeometry(display_, window_, &root_wind, &x, &y, &width,
+					  &height, &border_width, &depth);
+					  
+	Rect r;
+  
+	r.x = x;
+	r.y = y;
+	r.width = width;
+	r.height = height;
+  
+	return r;
+}
+
+void GameDisplay::drawText(int x, int y, const std::string &str) const
+{
+    XDrawString(display_, window_, DefaultGC(display_, screen_), x, y, str.c_str(), str.size());
+}
+
+
+struct Character {
+	unsigned long color = 0x6091ab;
+	Point position {10, 10};
+	Size size {10, 10};
+
+	Character(unsigned long new_col, Point new_pos, Size new_sz)
+	: color(new_col), position(new_pos), size(new_sz) {};
+	
+	Rect bounds() const
+	{
+		return {position.x, position.y, size.width, size.height};
+	}
+};
+
+struct Player : public Character {
+	Player() : Character(0x6091ab, {10,10}, {10,10}) {};
+};
+
+struct Food : public Character {
+	Food() : Character(0xe0f731, {100, 100}, {10, 10}) {};
+};
+
+struct Ghost : public Character {
+	Ghost() : Character(0xff0000, {100, 100}, {10, 10})
+    {
+        time_at_last_move_ns_ = time_.time();
+    };
+
+    void move()
+    {
+        int direction = std::rand() % 4;
+        const int MOVE_DIST = 10;
+
+        switch (direction)
+        {
+            case 0 : position.y -= MOVE_DIST; break;
+            case 1 : position.y += MOVE_DIST; break;
+            case 2 : position.x -= MOVE_DIST; break;
+            case 3 : position.x += MOVE_DIST; break;
+        }
+
+        time_at_last_move_ns_ = time_.time();
+    }
+
+    bool isTimeToMove()
+    {
+        return ((time_.time() - time_at_last_move_ns_) >= move_time_ns_);
+    }
+
+    long time_at_last_move_ns_;
+    long move_time_ns_ {250'000'000};
+    Time time_;
+};
 
 class Game {
-private:
-	Display *display;
-	int screen;
-	Window window;
-	int x11_fd;
-	fd_set in_fds;
-	XEvent e, ev;
-
-	struct timeval tv;
-	bool game_over = false;
-	bool game_won = false;
-	bool time_to_exit = false;
-	bool redraw = false;
-	std::vector<Food> food;
-	std::vector<Ghost> ghosts;
-	Player player;
-
-	void initEventListener();
-	void setupEventTimer();
-	void waitForEvent();
-	void createFood();
-	void createGhosts();
-	void drawSingleFood(Food &f);
-	void drawAllFood();
-	void drawSingleGhost(Ghost &g);
-	void drawAllGhosts();
-	void drawPlayer();
-	void drawMessages();
-	void handleEvents();
-	void draw();
-	void sendRedraw();
-	void checkFoodEaten();
-	void checkGhostContact();
-	void updateGhosts();
-
 public:
 	Game();
-	~Game();
 
 	void run();
+
+private:
+	GameDisplay gamedisplay_;
+	XEvent event_;
+	bool is_running_ = true;
+    bool game_over = false;
+    bool game_won = false;
+	Player player_;
+	std::vector<Food> food_;
+	std::vector<Ghost> ghosts_;
+
+	bool getEvent();
+    void updateGhosts();
+	void handleEvent();
+    void resetGame();
+	bool isPlayerWithinBounds();
+	void drawPlayer();
+	void draw();
+	void createFood();
+	void drawAllFood();
+	void createGhosts();
+	void drawAllGhosts();
+    void drawMessage();
+	void update();
+	void drawCharacter(const Character &obj) const;
 };
 
 Game::Game()
 {
-	display = XOpenDisplay(NULL);
-	if (display == NULL)
-	{
-		printf("%s::%s::%d: Unable to open display\n", __FILE__, __FUNCTION__, __LINE__);
-		throw std::runtime_error("Failed to open display\n");
-	}
-
-	screen = DefaultScreen(display);
-	printf("screen=%d\n", screen);
-
-	srand(time(NULL));
-
-	window = XCreateSimpleWindow(display, RootWindow(display, screen), 10, 10, 500, 500, 1,
-			BlackPixel(display,screen), WhitePixel(display,screen));
-
-	XSelectInput(display, window, ExposureMask | KeyPressMask);
-	XMapWindow(display, window);
-
-	initEventListener();
+	std::srand(std::time(nullptr));
 	createFood();
 	createGhosts();
 }
 
-Game::~Game()
+void Game::run()
 {
-	XCloseDisplay(display);
-}
-
-void Game::initEventListener()
-{
-	x11_fd = ConnectionNumber(display);
-}
-
-void Game::sendRedraw()
-{
-	if (redraw)
+	while (is_running_)
 	{
-		Window w_root;
-		int x, y;
-		unsigned int width, height, border_width, depth;
-		XGetGeometry(display, window, &w_root, &x, &y, &width, &height, &border_width, &depth);
-		XEvent ev;
-		ev.xexpose.type = Expose;
-		ev.xexpose.display = display;
-		ev.xexpose.window = window;
-		ev.xexpose.x = x;
-		ev.xexpose.y = y;
-		ev.xexpose.width = width;
-		ev.xexpose.height = height;
-		ev.xexpose.count = 0;
-		XSendEvent(display,window,false, ExposureMask, &ev);
+        if (!game_over)
+            updateGhosts();
+
+        if (getEvent())
+		{
+			handleEvent();
+			if (!game_over && !isPlayerWithinBounds())
+			{
+				printf("PLAYER OUT OF BOUNDS -- GAME OVER!! -- YOU LOSE!!\n");
+                game_over = true;
+                game_won = false;
+			}
+		}
 	}
 }
 
-void Game::drawSingleFood(Food &f)
+bool Game::getEvent()
 {
-	if (!f.eaten)
+	if (XPending(gamedisplay_.getDisplay()))
 	{
-		unsigned long col = (f.COLOR[0] << 16) + (f.COLOR[1] << 8) + f.COLOR[2];
-		XSetForeground(display, DefaultGC(display,screen), col);
-		XFillRectangle(display, window, DefaultGC(display,screen), f.position.x, f.position.y, f.SIZE.width, f.SIZE.height);
+		XNextEvent(gamedisplay_.getDisplay(), &event_);
+		printf("EVENT: %d\n", event_.type);
+		return true;
 	}
+
+	return false;
 }
 
-void Game::drawSingleGhost(Ghost &g)
+void Game::drawPlayer()
 {
-	if (g.active)
+	drawCharacter(player_);
+}
+
+void Game::draw()
+{
+	drawAllFood();
+	drawAllGhosts();
+	drawPlayer();
+    drawMessage();
+}
+
+void Game::createFood()
+{
+	food_.clear();
+	food_.resize(10);
+	const int MAXX = 800;
+	const int MAXY = 600;
+
+	for (auto &f: food_)
 	{
-		unsigned long col = (g.COLOR[0] << 16) + (g.COLOR[1] << 8) + g.COLOR[2];
-		XSetForeground(display, DefaultGC(display,screen), col);
-		XFillRectangle(display, window, DefaultGC(display,screen), g.position.x, g.position.y, g.SIZE.width, g.SIZE.height);
+		f.position.x = (std::rand() % MAXX)/10*10;
+		f.position.y = (std::rand() % MAXY)/10*10;
 	}
 }
 
 void Game::drawAllFood()
 {
-	for (auto &f: food)
+	for (auto &f: food_)
 	{
-		drawSingleFood(f);
-	}
-}
-
-void Game::drawAllGhosts()
-{
-	for (auto &g: ghosts)
-	{
-		drawSingleGhost(g);
-	}
-}
-
-void Game::updateGhosts()
-{
-	for (auto &g: ghosts)
-	{
-		if (g.active)
-		{
-			if (isRectOverlapped(player.position, player.SIZE, g.position, g.SIZE))
-			{
-				game_over = true;
-				return;
-			}
-
-			if (g.isTimeToMove())
-			{
-				printf("Time to move Ghost\n");
-				g.updateTimeToMove();
-
-				switch (rand() % 4)
-				{
-				case 0: g.position.x += 10; break;
-				case 1: g.position.x -= 10; break;
-				case 2: g.position.y += 10; break;
-				case 3: g.position.y -= 10; break;
-				}
-
-				//sendRedraw();
-				redraw = true;
-				printf("%s::%s::%d: Redraw=true\n", __FILE__, __FUNCTION__, __LINE__);
-			}
-		}
-	}
-}
-
-void Game::createFood()
-{
-	food.clear();
-	food.resize(10);
-	const int MAXX = 500, MAXY=500;
-
-	for (auto &f:food)
-	{
-		f.position.x = (rand() % (MAXX/10) ) *10;
-		f.position.y = (rand() % (MAXY/10) ) *10;
-		f.eaten = false;
-		//printf("%d,%d\n", f.x, f.y);
+		drawCharacter(f);
 	}
 }
 
 void Game::createGhosts()
 {
-	ghosts.clear();
-	ghosts.resize(10);
-	const int MAXX = 500, MAXY=500;
+	ghosts_.clear();
+	ghosts_.resize(10);
+	const int MAXX = 800;
+	const int MAXY = 600;
 
-	for (auto &g:ghosts)
+	for (auto &g: ghosts_)
 	{
-		g.position.x = (rand() % (MAXX/10) ) *10;
-		g.position.y = (rand() % (MAXY/10) ) *10;
-		g.active = true;
-		g.speed = 1;
+		g.position.x = (std::rand() % MAXX)/10*10;
+		g.position.y = (std::rand() % MAXY)/10*10;
 	}
 }
 
-void Game::setupEventTimer()
+void Game::drawAllGhosts()
 {
-	FD_ZERO(&in_fds);
-	FD_SET(x11_fd, &in_fds);
-
-	tv.tv_sec = 0;
-	tv.tv_usec = 100000L;
-}
-
-void Game::waitForEvent()
-{
-	setupEventTimer();
-
-	int num_ready_fds = select(x11_fd + 1, &in_fds, NULL, NULL, &tv);
-
-	if (num_ready_fds > 0)
-		printf("EVENT RECEIVED\n");
-	else if (num_ready_fds == 0)
+	for (auto &g: ghosts_)
 	{
-		printf("Timer Fired!\n");
-	}
-	else
-		printf("ERROR\n");
-}
-
-void Game::drawPlayer()
-{
-	unsigned long col = 0;
-	XSetForeground(display, DefaultGC(display,screen), col);
-	XFillRectangle(display,window,DefaultGC(display,screen),
-			player.position.x, player.position.y, player.SIZE.width, player.SIZE.height);
-}
-
-void Game::drawMessages()
-{
-	if (game_over)
-	{
-		const char *game_over_win_msg = "GAME OVER!!! YOU WIN!!! PRESS SPACEBAR TO RESTART";
-		const char *game_over_lose_msg = "GAME OVER!!! YOU LOSE!!! PRESS SPACEBAR TO RESTART";
-
-		if (game_won)
-			XDrawString(display,window,DefaultGC(display,screen), 10, 50, game_over_win_msg, strlen(game_over_win_msg));
-		else
-			XDrawString(display,window,DefaultGC(display,screen), 10, 50, game_over_lose_msg, strlen(game_over_lose_msg));
+		drawCharacter(g);
 	}
 }
 
-void Game::draw()
+void Game::drawMessage()
 {
-	printf("Expose\n");
-	XClearWindow(display, window);
-	drawAllFood();
-	drawAllGhosts();
-	drawPlayer();
-	drawMessages();
+    if (!game_over)
+        return;
+
+    if (game_won)
+        gamedisplay_.drawText(100, 100, "YOU WIN!!  PRESS SPACEBAR TO RESTART...");
+    else
+        gamedisplay_.drawText(100, 100, "YOU LOSE!! PRESS SPACEBAR TO RESTART...");
 }
 
-void Game::checkFoodEaten()
+void Game::update()
 {
-	bool all_eaten = true;
-	for (auto &f: food)
+  	auto iter = std::find_if(food_.begin(), food_.end(), [&](const Food &f){
+		return rectangleIntersect(player_.bounds(), f.bounds());
+	});
+
+	if (iter != food_.end())
 	{
-		if (!f.eaten)
-		{
-			if (isRectOverlapped(player.position, player.SIZE, f.position, f.SIZE))
-			{
-				f.eaten = true;
-				//sendRedraw();
-				redraw = true;
-				printf("%s::%s::%d: Redraw=true\n", __FILE__, __FUNCTION__, __LINE__);
-			}
-			all_eaten = false;
-		}
+		food_.erase(iter);
 	}
 
-	if (all_eaten)
+	if (food_.empty())
 	{
 		game_over = true;
-		game_won = true;
-		//sendRedraw();
-		redraw = true;
-		printf("%s::%s::%d: Redraw=true\n", __FILE__, __FUNCTION__, __LINE__);
+        game_won = true;
+	}
+  	
+	auto iter_ghosts = std::find_if(ghosts_.begin(), ghosts_.end(), [&](const Ghost &g){
+		return rectangleIntersect(player_.bounds(), g.bounds());
+	});
+
+	if (iter_ghosts != ghosts_.end())
+	{
+        game_over = true;
+		game_won = false;
+		std::cout << "YOU LOSE!!\n";
 	}
 }
 
-void Game::handleEvents()
+void Game::drawCharacter(const Character &obj) const
 {
-	while (XPending(display))
-	{
-		XNextEvent(display, &e);
-		printf("Next Event Received: ");
-		if (e.type == Expose)
-			draw();
-
-		if (e.type == KeyPress)
-		{
-			printf("Keypress\n");
-			printf("Keycode = %u\n", e.xkey.keycode);
-
-			switch (e.xkey.keycode)
-			{
-			case KEY_ESC : time_to_exit = true; break;
-			case KEY_UP_ARROW : if (!game_over) {player.position.y-=10; redraw=true;} break;
-			case KEY_DOWN_ARROW : if (!game_over) {player.position.y+=10; redraw=true;} break;
-			case KEY_LEFT_ARROW : if (!game_over) {player.position.x-=10; redraw=true;} break;
-			case KEY_RIGHT_ARROW : if (!game_over) {player.position.x+=10; redraw=true;} break;
-			case KEY_SPACEBAR : if (game_over) {game_over = false; game_won = false; player.position = player.INITIAL_POSITION; createFood(); createGhosts(); redraw=true; } break;
-			}
-
-		}
-
-		if (!game_over)
-		{
-			checkFoodEaten();
-
-			Window w_root;
-			int w_x, w_y;
-			unsigned int w_width, w_height, w_border_width, w_depth;
-			XGetGeometry(display, window, &w_root, &w_x, &w_y, &w_width, &w_height, &w_border_width, &w_depth);
-
-			if ( (player.position.x < 0 || (player.position.x+player.SIZE.width) > w_width)
-					|| (player.position.y < 0 || (player.position.y+player.SIZE.height) > w_height) )
-			{
-				game_over = true;
-				//sendRedraw();
-				redraw = true;
-				printf("%s::%s::%d: Redraw=true\n", __FILE__, __FUNCTION__, __LINE__);
-			}
-		}
-	}
-
-	if (!game_over)
-		updateGhosts();
-
+	gamedisplay_.drawRect(obj.color, 
+		obj.position.x,
+		obj.position.y,
+		obj.size.width,
+		obj.size.height);
 }
 
-void Game::run()
+void Game::updateGhosts()
 {
-	while (!time_to_exit)
+    bool ghost_moved = false;
+    for (auto &g: ghosts_)
+    {
+        if (g.isTimeToMove()) {
+            g.move();
+            ghost_moved = true;
+        }
+    }
+
+    if (ghost_moved)
+        gamedisplay_.redraw();
+}
+
+void Game::handleEvent()
+{
+	if (event_.type == Expose)
 	{
-		waitForEvent();
-		handleEvents();
-		sendRedraw();
+		draw();
 	}
+
+	if (event_.type == KeyPress)
+	{
+		printf("KeyPress Event: %d\n", event_.xkey.keycode);
+
+		switch (event_.xkey.keycode)
+		{
+			case KEY_UP       : printf("KEY_UP\n");    if (!game_over) { player_.position.y -= 10; gamedisplay_.redraw(); } break;
+			case KEY_DOWN     : printf("KEY_DOWN\n");  if (!game_over) { player_.position.y += 10; gamedisplay_.redraw(); } break;
+			case KEY_LEFT     : printf("KEY_LEFT\n");  if (!game_over) { player_.position.x -= 10; gamedisplay_.redraw(); } break;
+			case KEY_RIGHT    : printf("KEY_RIGHT\n"); if (!game_over) { player_.position.x += 10; gamedisplay_.redraw(); } break;
+			
+			case KEY_SPACEBAR : printf("KEY_SPACEBAR\n"); if (game_over) resetGame(); break;
+
+			case KEY_ESCAPE   : printf("KEY_ESCAPE\n"); 
+							    is_running_ = false; break;
+		}
+		update();
+	}
+}
+
+void Game::resetGame()
+{
+    player_.position = {10, 10};
+    createFood();
+    createGhosts();
+    game_won = false;
+    game_over = false;
+}
+
+bool Game::isPlayerWithinBounds()
+{
+	Rect w = gamedisplay_.getGeometry();
+	
+	if (   player_.position.x < 0 || player_.position.x > w.width 
+		|| player_.position.y < 0 || player_.position.y > w.height)
+	{
+		return false;
+	}
+	
+	return true;
+}
+
 }
 
 int main()
 {
-	Game g;
+	mygame::Game g;
 
 	g.run();
 
